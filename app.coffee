@@ -17,6 +17,20 @@ initDataServer = (state) ->
 	state.dataServer.listen 0
 
 COMMAND_HANDLERS =
+	CWD: (state, arg) ->
+		if state.loggedIn
+			if fs.existsSync arg
+				stats = fs.lstatSync arg
+				if stats.isDirectory()
+					state.currentDirectory = arg
+					state.controlSocket.write "250 CWD command successful.\r\n"
+				else
+					state.controlSocket.write "550 #{arg}: Not a directory.\r\n"
+			else
+				state.controlSocket.write "550 #{arg}: No such file or directory.\r\n"
+		else
+			state.controlSocket.write "530 Please login with USER and PASS.\r\n"
+
 	EPSV: (state, arg) ->
 		if state.loggedIn
 			initDataServer state
@@ -33,9 +47,9 @@ COMMAND_HANDLERS =
 			if state.dataConnected
 				state.controlSocket.write "150 Opening ASCII mode data connection for '/bin/ls'.\r\n"
 
-				childProcess.exec "ls -lA", (error, stdout, stderr) ->
-					state.dataSocket.write stdout
-					state.controlSocket.write "226 Transfer complete.\r\n"		# TODO: Put in callback so it really writes after data is sent.
+				childProcess.exec "ls -lA #{state.currentDirectory}", (error, stdout, stderr) ->
+					state.dataSocket.end stdout
+					state.controlSocket.write "226 Transfer complete.\r\n"
 			else
 				state.controlSocket.write "425 Can't build data connection: Connection refused.\r\n"		# TODO: Add active support.
 		else
@@ -60,12 +74,42 @@ COMMAND_HANDLERS =
 			if localAddress.length is 4
 				state.controlSocket.write "227 Entering Passive Mode (#{localAddress.join ","},#{Math.floor dataPort / 256},#{dataPort % 256})\r\n"
 			else
-				state.controlSocket.write "425 Can't open passive connection: Address family not supported by protocol family."
+				state.controlSocket.write "425 Can't open passive connection: Address family not supported by protocol family.\r\n"
 		else
 			state.controlSocket.write "530 Please login with USER and PASS.\r\n"
 
 	PWD: (state, arg) ->
 		state.controlSocket.write "257 \"#{state.currentDirectory}\" is the current directory.\r\n"
+
+	RETR: (state, arg) ->
+		if state.loggedIn
+			if fs.existsSync arg
+				stats = fs.lstatSync arg
+				if stats.isFile()
+					state.controlSocket.write "150 Opening ASCII mode data connection for '#{arg}' (#{stats.size} bytes).\r\n"
+					readStream = fs.createReadStream arg
+					readStream.pipe state.dataSocket
+					readStream.on "end", ->
+						state.controlSocket.write "226 Transfer complete.\r\n"
+				else
+					state.controlSocket.write "550 #{arg}: Not a plain file.\r\n"
+			else
+				state.controlSocket.write "550 #{arg}: No such file or directory.\r\n"
+		else
+			state.controlSocket.write "530 Please login with USER and PASS.\r\n"
+
+	SIZE: (state, arg) ->
+		if state.loggedIn
+			if fs.existsSync arg
+				stats = fs.lstatSync arg
+				if stats.isFile()
+					state.controlSocket.write "213 #{stats.size}\r\n"
+				else
+					state.controlSocket.write "550 #{arg}: not a plain file.\r\n"
+			else
+				state.controlSocket.write "550 #{arg}: No such file or directory.\r\n"
+		else
+				state.controlSocket.write "530 Please login with USER and PASS.\r\n"
 
 	SYST: (state, arg) ->
 		state.controlSocket.write "215 UNIX Type: L8\r\n"
@@ -102,7 +146,7 @@ ftpClientHandler = (socket) ->
 		args = data.toString().trim().split " "
 
 		console.log data.toString()
-		COMMAND_HANDLERS[args[0]] state, args[1]
+		COMMAND_HANDLERS[args[0]] state, args[1..]...
 
 server = net.createServer ftpClientHandler
 server.listen ARGUMENTS[0]
